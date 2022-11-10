@@ -4,8 +4,8 @@ python main.py \
   -a resnet50 \
   --batch-size 64 \
   --mlp --aug-plus --cos \
-  --data-A '../datasets/Office-Home/Product' \
-  --data-B '../datasets/Office-Home/Clipart' \
+  --data-A '/datasets/OfficeHome/images/Product' \
+  --data-B '/datasets/OfficeHome/images/Clipart' \
   --num-cluster '65' \
   --warmup-epoch 20 \
   --temperature 0.2 \

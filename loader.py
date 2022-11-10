@@ -33,6 +33,9 @@ def folder_content_getter(folder_path):
 
     cate_names = list(np.sort(os.listdir(folder_path)))
 
+    if 'domainnet' in folder_path.lower():
+        cate_names = ['bird', 'feather', 'teapot', 'tiger', 'whale', 'windmill', 'zebra']
+
     image_path_list = []
     image_cate_list = []
 

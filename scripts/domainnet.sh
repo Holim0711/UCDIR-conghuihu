@@ -4,8 +4,8 @@ python main.py \
   -a resnet50 \
   --batch-size 64 \
   --mlp --aug-plus --cos \
-  --data-A '../datasets/domainNet/clipart' \
-  --data-B '../datasets/domainNet/sketch' \
+  --data-A '/datasets/DomainNet/images/clipart' \
+  --data-B '/datasets/DomainNet/images/sketch' \
   --num-cluster '7' \
   --warmup-epoch 20 \
   --temperature 0.2 \

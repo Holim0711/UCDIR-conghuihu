@@ -137,8 +137,8 @@ def main_worker(gpu, args):
 
     cudnn.benchmark = True
 
-    traindirA = os.path.join(args.data_A, 'train')
-    traindirB = os.path.join(args.data_B, 'train')
+    traindirA = args.data_A     # os.path.join(args.data_A, 'train')
+    traindirB = args.data_B     # os.path.join(args.data_B, 'train')
 
     train_dataset = loader.TrainDataset(traindirA, traindirB, args.aug_plus)
     eval_dataset = loader.EvalDataset(traindirA, traindirB)
