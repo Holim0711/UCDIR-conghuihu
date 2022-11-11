@@ -28,8 +28,8 @@ model_names = sorted(name for name in models.__dict__
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('--data-A', metavar='DIR Domain A', help='path to domain A dataset')
-parser.add_argument('--data-B', metavar='DIR Domain B', help='path to domain B dataset')
+parser.add_argument('--data_A', metavar='DIR Domain A', help='path to domain A dataset')
+parser.add_argument('--data_B', metavar='DIR Domain B', help='path to domain B dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -102,11 +102,12 @@ parser.add_argument('--distofdist-startepoch', default=20, type=int,
                     help='the start epoch for dist of dist loss')
 parser.add_argument('--distofdist-weight', default=20, type=float,
                     help='the start weight for dist of dist loss')
-parser.add_argument('--prec-nums', default='1,5,15', type=str,
+parser.add_argument('--prec-nums', default='1,5,15,20', type=str,
                     help='the evaluation metric')
 
 
 def main():
+    torch.cuda.empty_cache()
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -186,8 +187,10 @@ def main_worker(gpu, args):
             print("=> no clean model found at '{}'".format(args.clean_model))
 
     info_save = open(os.path.join(args.exp_dir, 'info.txt'), 'w')
-    best_res_A = [0., 0., 0.]
-    best_res_B = [0., 0., 0.]
+    best_res_A = [0., 0., 0., 0.]
+    best_res_B = [0., 0., 0., 0.]
+    best_ndcg_A = [0., 0., 0., 0.]
+    best_ndcg_B = [0., 0., 0., 0.]
     for epoch in range(args.epochs):
 
         features_A, features_B, _, _ = compute_features(eval_loader, model, args)
@@ -215,19 +218,38 @@ def main_worker(gpu, args):
         targets_B = targets_B.numpy()
 
         prec_nums = args.prec_nums.split(',')
-        res_A, res_B = retrieval_precision_cal(features_A, targets_A, features_B, targets_B,
-                                               preck=(int(prec_nums[0]), int(prec_nums[1]), int(prec_nums[2])))
+        res_A, res_B, ndcg_A, ndcg_B = retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B,
+                                               preck=(int(prec_nums[0]), int(prec_nums[1]), int(prec_nums[2]), int(prec_nums[3])))
 
         if (best_res_A[0] + best_res_B[0]) / 2 < (res_A[0] + res_B[0]) / 2:
             best_res_A = res_A
             best_res_B = res_B
 
-    info_save.write("Domain A->B: P@{}: {}; P@{}: {}; P@{}: {} \n".format(int(prec_nums[0]), best_res_A[0],
+        
+        if (best_ndcg_A[0] + best_ndcg_B[0]) / 2 < (ndcg_A[0] + ndcg_B[0]) / 2:
+            best_ndcg_A = ndcg_A
+            best_ndcg_B = ndcg_B
+
+    info_save.write("Domain A->B: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_A[0],
                                                                           int(prec_nums[1]), best_res_A[1],
-                                                                          int(prec_nums[2]), best_res_A[2]))
-    info_save.write("Domain B->A: P@{}: {}; P@{}: {}; P@{}: {} \n".format(int(prec_nums[0]), best_res_B[0],
+                                                                          int(prec_nums[2]), best_res_A[2],
+                                                                          int(prec_nums[3]), best_res_A[3]))
+    
+    info_save.write("Domain A->B: N@{}: {}; N@{}: {}; N@{}: {}; N@{}: {}; \n".format(int(prec_nums[0]), best_ndcg_A[0],
+                                                                          int(prec_nums[1]), best_ndcg_A[1],
+                                                                          int(prec_nums[2]), best_ndcg_A[2],
+                                                                          int(prec_nums[3]), best_ndcg_A[3]))
+
+
+    info_save.write("Domain B->A: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_B[0],
                                                                           int(prec_nums[1]), best_res_B[1],
-                                                                          int(prec_nums[2]), best_res_B[2]))
+                                                                          int(prec_nums[2]), best_res_B[2],
+                                                                          int(prec_nums[3]), best_res_B[3]))
+    
+    info_save.write("Domain B->A: N@{}: {}; N@{}: {}; N@{}: {}; N@{}: {}; \n".format(int(prec_nums[0]), best_ndcg_B[0],
+                                                                          int(prec_nums[1]), best_ndcg_B[1],
+                                                                          int(prec_nums[2]), best_ndcg_B[2],
+                                                                          int(prec_nums[3]), best_ndcg_B[3]))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result):
@@ -421,12 +443,16 @@ def run_kmeans(x_A, x_B, args):
     return results
 
 
-def retrieval_precision_cal(features_A, targets_A, features_B, targets_B, preck=(1, 5, 15)):
+def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, preck=(1, 5, 15, 20)):
 
     dists = cosine_similarity(features_A, features_B)
 
     res_A = []
+    ndcg_A = []
+
     res_B = []
+    ndcg_B = []
+
     for domain_id in ['A', 'B']:
         if domain_id == 'A':
             query_targets = targets_A
@@ -435,12 +461,15 @@ def retrieval_precision_cal(features_A, targets_A, features_B, targets_B, preck=
             all_dists = dists
 
             res = res_A
+            ndcg = ndcg_A
+
         else:
             query_targets = targets_B
             gallery_targets = targets_A
 
             all_dists = dists.transpose()
             res = res_B
+            ndcg = ndcg_B
 
         sorted_indices = np.argsort(-all_dists, axis=1)
         sorted_cates = gallery_targets[sorted_indices.flatten()].reshape(sorted_indices.shape)
@@ -449,16 +478,35 @@ def retrieval_precision_cal(features_A, targets_A, features_B, targets_B, preck=
         for k in preck:
             total_num = 0
             positive_num = 0
+            ndcg_num = 0
             for index in range(all_dists.shape[0]):
 
                 temp_total = min(k, (gallery_targets == query_targets[index]).sum())
                 pred = correct[index, :temp_total]
+                #print('pred')
+                #print(pred)
 
                 total_num += temp_total
                 positive_num += pred.sum()
-            res.append(positive_num / total_num * 100.0)
+                #print('total_num')
+                #print(total_num)
+                #print('pred sum')
+                #print(positive_num)
 
-    return res_A, res_B
+                ndcg_sum = 0
+                for idx, ps in enumerate(pred):
+                    if ps == True:
+                        ndcg_sum += 1 / np.log2(idx + 2)
+                ndcg_num += ndcg_sum
+                #print('ndcg sum')
+                #print(ndcg_num)
+            res.append(positive_num / total_num * 100.0)
+            ndcg.append(ndcg_num / total_num * 100.0)
+
+    return res_A, res_B, ndcg_A, ndcg_B
+
+
+
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
