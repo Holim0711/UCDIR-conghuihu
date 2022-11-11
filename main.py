@@ -483,23 +483,28 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
                 temp_total = min(k, (gallery_targets == query_targets[index]).sum())
                 pred = correct[index, :temp_total]
-                #print('pred')
-                #print(pred)
-
+        
                 total_num += temp_total
                 positive_num += pred.sum()
-                #print('total_num')
-                #print(total_num)
-                #print('pred sum')
-                #print(positive_num)
 
                 ndcg_sum = 0
-                for idx, ps in enumerate(pred):
-                    if ps == True:
-                        ndcg_sum += 1 / np.log2(idx + 2)
-                ndcg_num += ndcg_sum
-                #print('ndcg sum')
-                #print(ndcg_num)
+                idcg_sum = 0
+                idcg_cnt = pred.sum()
+
+                for cnt in range(idcg_cnt):
+                    idcg_sum += 1 / np.log2(cnt + 2)
+                
+                if not idcg_sum == 0:
+
+                    for idx, ps in enumerate(pred):
+                        
+                        if ps == True:
+                            ndcg_sum += 1 / np.log2(idx + 2)
+
+                    
+                    ndcg_num += ndcg_sum / idcg_sum
+
+
             res.append(positive_num / total_num * 100.0)
             ndcg.append(ndcg_num / total_num * 100.0)
 
