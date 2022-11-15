@@ -545,7 +545,7 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
             res.append(positive_num / total_num * 100.0)
             ndcg.append(ndcg_num / denom * 100.0)
             meanap.append(meanap_num / denom * 100.0)
-            print(res, ndcg, meanap)
+            
     return res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B
 
 
