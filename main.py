@@ -191,6 +191,9 @@ def main_worker(gpu, args):
     best_res_B = [0., 0., 0., 0.]
     best_ndcg_A = [0., 0., 0., 0.]
     best_ndcg_B = [0., 0., 0., 0.]
+    best_meanap_A = [0., 0., 0., 0.]
+    best_meanap_B = [0., 0., 0., 0.]
+
     for epoch in range(args.epochs):
 
         features_A, features_B, _, _ = compute_features(eval_loader, model, args)
@@ -218,7 +221,7 @@ def main_worker(gpu, args):
         targets_B = targets_B.numpy()
 
         prec_nums = args.prec_nums.split(',')
-        res_A, res_B, ndcg_A, ndcg_B = retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B,
+        res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B = retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B,
                                                preck=(int(prec_nums[0]), int(prec_nums[1]), int(prec_nums[2]), int(prec_nums[3])))
 
         if (best_res_A[0] + best_res_B[0]) / 2 < (res_A[0] + res_B[0]) / 2:
@@ -229,6 +232,10 @@ def main_worker(gpu, args):
         if (best_ndcg_A[0] + best_ndcg_B[0]) / 2 < (ndcg_A[0] + ndcg_B[0]) / 2:
             best_ndcg_A = ndcg_A
             best_ndcg_B = ndcg_B
+        
+        if (best_meanap_A[0] + best_meanap_B[0]) / 2 < (meanap_A[0] + meanap_B[0]) / 2:
+            best_meanap_A = meanap_A
+            best_meanap_B = meanap_B
 
     info_save.write("Domain A->B: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_A[0],
                                                                           int(prec_nums[1]), best_res_A[1],
@@ -240,6 +247,10 @@ def main_worker(gpu, args):
                                                                           int(prec_nums[2]), best_ndcg_A[2],
                                                                           int(prec_nums[3]), best_ndcg_A[3]))
 
+    info_save.write("Domain A->B: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_meanap_A[0],
+                                                                          int(prec_nums[1]), best_meanap_A[1],
+                                                                          int(prec_nums[2]), best_meanap_A[2],
+                                                                          int(prec_nums[3]), best_meanap_A[3]))
 
     info_save.write("Domain B->A: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_B[0],
                                                                           int(prec_nums[1]), best_res_B[1],
@@ -251,6 +262,10 @@ def main_worker(gpu, args):
                                                                           int(prec_nums[2]), best_ndcg_B[2],
                                                                           int(prec_nums[3]), best_ndcg_B[3]))
 
+    info_save.write("Domain B->A: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; \n".format(int(prec_nums[0]), best_meanap_B[0],
+                                                                          int(prec_nums[1]), best_meanap_B[1],
+                                                                          int(prec_nums[2]), best_meanap_B[2],
+                                                                          int(prec_nums[3]), best_meanap_B[3]))
 
 def train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result):
 
@@ -449,9 +464,11 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
     res_A = []
     ndcg_A = []
+    meanap_A = []
 
     res_B = []
     ndcg_B = []
+    meanap_B = []
 
     for domain_id in ['A', 'B']:
         if domain_id == 'A':
@@ -462,6 +479,7 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
             res = res_A
             ndcg = ndcg_A
+            meanap = meanap_A
 
         else:
             query_targets = targets_B
@@ -470,6 +488,7 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
             all_dists = dists.transpose()
             res = res_B
             ndcg = ndcg_B
+            meanap = meanap_B
 
         sorted_indices = np.argsort(-all_dists, axis=1)
         sorted_cates = gallery_targets[sorted_indices.flatten()].reshape(sorted_indices.shape)
@@ -479,19 +498,30 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
             total_num = 0
             positive_num = 0
             ndcg_num = 0
-            ndcg_denom = 0
+            meanap_num = 0
+            denom = all_dists.shape[0]
             for index in range(all_dists.shape[0]):
-
+                
+                # Precision@K
                 temp_total = min(k, (gallery_targets == query_targets[index]).sum())
                 pred = correct[index, :temp_total]
         
                 total_num += temp_total
                 positive_num += pred.sum()
-
+                
+                # MAP@K
+                meanap_inter = 0
+                for m_idx in range(1, k+1):
+                    rel_pred = correct[index, :m_idx]
+                    rel_pos = rel_pred.sum()
+                    meanap_inter += rel_pos / m_idx
+                meanap_inter /= k
+                meanap_num += meanap_inter
+                
+                # NDCG@K
                 ndcg_sum = 0
                 idcg_sum = 0
                 idcg_cnt = temp_total
-                ndcg_denom += 1
 
                 for cnt in range(idcg_cnt):
                     idcg_sum += 1 / np.log2(cnt + 2)
@@ -508,9 +538,10 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
 
             res.append(positive_num / total_num * 100.0)
-            ndcg.append(ndcg_num / ndcg_denom * 100.0)
-
-    return res_A, res_B, ndcg_A, ndcg_B
+            ndcg.append(ndcg_num / denom * 100.0)
+            meanap.append(meanap_num / denom * 100.0)
+            print(res, ndcg, meanap)
+    return res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B
 
 
 
