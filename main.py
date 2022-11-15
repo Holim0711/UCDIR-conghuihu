@@ -479,6 +479,7 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
             total_num = 0
             positive_num = 0
             ndcg_num = 0
+            ndcg_denom = 0
             for index in range(all_dists.shape[0]):
 
                 temp_total = min(k, (gallery_targets == query_targets[index]).sum())
@@ -489,7 +490,8 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
                 ndcg_sum = 0
                 idcg_sum = 0
-                idcg_cnt = pred.sum()
+                idcg_cnt = temp_total
+                ndcg_denom += 1
 
                 for cnt in range(idcg_cnt):
                     idcg_sum += 1 / np.log2(cnt + 2)
@@ -506,7 +508,7 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
 
             res.append(positive_num / total_num * 100.0)
-            ndcg.append(ndcg_num / total_num * 100.0)
+            ndcg.append(ndcg_num / ndcg_denom * 100.0)
 
     return res_A, res_B, ndcg_A, ndcg_B
 
