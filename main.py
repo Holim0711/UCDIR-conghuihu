@@ -515,7 +515,12 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
                     rel_pred = correct[index, :m_idx]
                     rel_pos = rel_pred.sum()
                     meanap_inter += rel_pos / m_idx
-                meanap_inter /= k
+                
+                inter_denom = correct[index, :k+1].sum()
+                if not inter_denom == 0:
+                    meanap_inter /= inter_denom
+                else:
+                    meanap_inter = 0.0
                 meanap_num += meanap_inter
 
                 # NDCG@K
@@ -540,7 +545,7 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
             res.append(positive_num / total_num * 100.0)
             ndcg.append(ndcg_num / denom * 100.0)
             meanap.append(meanap_num / denom * 100.0)
-            
+            print(res, ndcg, meanap)
     return res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B
 
 
