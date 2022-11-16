@@ -191,8 +191,10 @@ def main_worker(gpu, args):
     best_res_B = [0., 0., 0., 0.]
     best_ndcg_A = [0., 0., 0., 0.]
     best_ndcg_B = [0., 0., 0., 0.]
-    best_meanap_A = [0., 0., 0., 0.]
-    best_meanap_B = [0., 0., 0., 0.]
+    #best_meanap_A = [0., 0., 0., 0.]
+    #best_meanap_B = [0., 0., 0., 0.]
+    best_meanap_A = [0.]
+    best_meanap_B = [0.]
 
     for epoch in range(args.epochs):
 
@@ -247,10 +249,11 @@ def main_worker(gpu, args):
                                                                           int(prec_nums[2]), best_ndcg_A[2],
                                                                           int(prec_nums[3]), best_ndcg_A[3]))
 
-    info_save.write("Domain A->B: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_meanap_A[0],
-                                                                          int(prec_nums[1]), best_meanap_A[1],
-                                                                          int(prec_nums[2]), best_meanap_A[2],
-                                                                          int(prec_nums[3]), best_meanap_A[3]))
+    info_save.write("Domain A->B: MAP: {}; \n".format(best_meanap_A[0]))
+    # info_save.write("Domain A->B: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; \n".format(int(prec_nums[0]), best_meanap_A[0],
+    #                                                                       int(prec_nums[1]), best_meanap_A[1],
+    #                                                                       int(prec_nums[2]), best_meanap_A[2],
+    #                                                                       int(prec_nums[3]), best_meanap_A[3]))
 
     info_save.write("Domain B->A: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_B[0],
                                                                           int(prec_nums[1]), best_res_B[1],
@@ -262,10 +265,11 @@ def main_worker(gpu, args):
                                                                           int(prec_nums[2]), best_ndcg_B[2],
                                                                           int(prec_nums[3]), best_ndcg_B[3]))
 
-    info_save.write("Domain B->A: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; \n".format(int(prec_nums[0]), best_meanap_B[0],
-                                                                          int(prec_nums[1]), best_meanap_B[1],
-                                                                          int(prec_nums[2]), best_meanap_B[2],
-                                                                          int(prec_nums[3]), best_meanap_B[3]))
+    info_save.write("Domain B->A: MAP: {}; \n".format(best_meanap_B[0]))
+    # info_save.write("Domain B->A: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; \n".format(int(prec_nums[0]), best_meanap_B[0],
+    #                                                                       int(prec_nums[1]), best_meanap_B[1],
+    #                                                                       int(prec_nums[2]), best_meanap_B[2],
+    #                                                                       int(prec_nums[3]), best_meanap_B[3]))
 
 def train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result):
 
@@ -494,6 +498,22 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
         sorted_cates = gallery_targets[sorted_indices.flatten()].reshape(sorted_indices.shape)
         correct = (sorted_cates == np.tile(query_targets[:, np.newaxis], sorted_cates.shape[1]))
 
+        # MAP
+        meanap_sum = 0
+        
+        for index in tqdm(range(all_dists.shape[0])):
+            
+            meanap_pred = correct[index, :]
+            ground_truth = meanap_pred.sum()
+            
+            m_idx_array = np.arange(1, meanap_pred.shape[0] + 1)
+            prec_array = np.cumsum(meanap_pred)
+            
+            ap_array = prec_array / m_idx_array * meanap_pred
+            meanap_sum += ap_array.sum() / ground_truth
+            
+        meanap.append(meanap_sum / all_dists.shape[0])
+    
         for k in preck:
             total_num = 0
             positive_num = 0
@@ -505,23 +525,22 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
                 # Precision@K
                 temp_total = min(k, (gallery_targets == query_targets[index]).sum())
                 pred = correct[index, :temp_total]
-        
                 total_num += temp_total
                 positive_num += pred.sum()
                 
-                # MAP@K
-                meanap_inter = 0
-                for m_idx in range(1, k+1):
-                    rel_pred = correct[index, :m_idx]
-                    rel_pos = rel_pred.sum()
-                    meanap_inter += rel_pos / m_idx
+                # # MAP@K
+                # meanap_inter = 0
+                # for m_idx in range(1, k+1):
+                #     rel_pred = correct[index, :m_idx]
+                #     rel_pos = rel_pred.sum()
+                #     meanap_inter += rel_pos / m_idx
                 
-                inter_denom = correct[index, :k+1].sum()
-                if not inter_denom == 0:
-                    meanap_inter /= inter_denom
-                else:
-                    meanap_inter = 0.0
-                meanap_num += meanap_inter
+                # inter_denom = correct[index, :k+1].sum()
+                # if not inter_denom == 0:
+                #     meanap_inter /= inter_denom
+                # else:
+                #     meanap_inter = 0.0
+                # meanap_num += meanap_inter
 
                 # NDCG@K
                 ndcg_sum = 0
@@ -544,7 +563,8 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
             res.append(positive_num / total_num * 100.0)
             ndcg.append(ndcg_num / denom * 100.0)
-            meanap.append(meanap_num / denom * 100.0)
+            #meanap.append(meanap_num / denom * 100.0) #MAP@K
+        
             
     return res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B
 
