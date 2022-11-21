@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import math
+from statistics import mean
 import os
 import random
 import shutil
@@ -141,11 +142,16 @@ def main_worker(gpu, args):
     traindirB = args.data_B     # os.path.join(args.data_B, 'train')
 
     train_dataset = loader.TrainDataset(traindirA, traindirB, args.aug_plus)
+    train_dataset_d = loader.DetTrainDataset(traindirA, traindirB)
     eval_dataset = loader.EvalDataset(traindirA, traindirB)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True, sampler=None, drop_last=True)
+
+    train_loader_d = torch.utils.data.DataLoader(
+        train_dataset_d, batch_size=args.batch_size * 2, shuffle=False,
+        num_workers=args.workers, pin_memory=True, sampler=None)
 
     eval_loader = torch.utils.data.DataLoader(
         eval_dataset, batch_size=args.batch_size * 2, shuffle=False,
@@ -153,7 +159,7 @@ def main_worker(gpu, args):
 
     model = builder.UCDIR(
         models.__dict__[args.arch],
-        dim=args.low_dim, K_A=eval_dataset.domainA_size, K_B=eval_dataset.domainB_size,
+        dim=args.low_dim, K_A=train_dataset.domainA_size, K_B=train_dataset.domainB_size,
         m=args.moco_m, T=args.temperature, mlp=args.mlp, selfentro_temp=args.selfentro_temp,
         num_cluster=args.num_cluster,  cwcon_filterthresh=args.cwcon_filterthresh)
 
@@ -186,11 +192,10 @@ def main_worker(gpu, args):
             print("=> no clean model found at '{}'".format(args.clean_model))
 
     info_save = open(os.path.join(args.exp_dir, 'info.txt'), 'w')
-    best_res_A = [0., 0., 0.]
-    best_res_B = [0., 0., 0.]
+    best_res = [0., 0., 0.]
     for epoch in range(args.epochs):
 
-        features_A, features_B, _, _ = compute_features(eval_loader, model, args)
+        features_A, features_B, _, _ = compute_features(train_loader_d, model, args)
 
         features_A = features_A.numpy()
         features_B = features_B.numpy()
@@ -207,28 +212,37 @@ def main_worker(gpu, args):
 
         train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result)
 
-        features_A, features_B, targets_A, targets_B = compute_features(eval_loader, model, args)
-        features_A = features_A.numpy()
-        targets_A = targets_A.numpy()
+        res = test(eval_loader, model, args)
 
-        features_B = features_B.numpy()
-        targets_B = targets_B.numpy()
+        if best_res[1] < res[1]:
+            best_res = res
+            print(f"Epoch {epoch}", *best_res, sep=', ', file=info_save, flush=True)
 
-        prec_nums = args.prec_nums.split(',')
-        res_A, res_B = retrieval_precision_cal(features_A, targets_A, features_B, targets_B,
-                                               preck=(int(prec_nums[0]), int(prec_nums[1]), int(prec_nums[2])))
+    info_save.write(f"Epoch {epoch}, {', '.join(map(str, best_res))}")
 
-        if (best_res_A[0] + best_res_B[0]) / 2 < (res_A[0] + res_B[0]) / 2:
-            best_res_A = res_A
-            best_res_B = res_B
 
-    info_save.write("Domain A->B: P@{}: {}; P@{}: {}; P@{}: {} \n".format(int(prec_nums[0]), best_res_A[0],
-                                                                          int(prec_nums[1]), best_res_A[1],
-                                                                          int(prec_nums[2]), best_res_A[2]))
-    info_save.write("Domain B->A: P@{}: {}; P@{}: {}; P@{}: {} \n".format(int(prec_nums[0]), best_res_B[0],
-                                                                          int(prec_nums[1]), best_res_B[1],
-                                                                          int(prec_nums[2]), best_res_B[2]))
+def test(eval_loader, model, args):
+    features_A, features_B, _, _ = compute_features(eval_loader, model, args, withoutfc=True)
+    print(features_A.shape, features_B.shape)
 
+    def pairwise_cosine_similarity(x1, x2=None, eps=1e-8):
+        x2 = x1 if x2 is None else x2
+        w1 = x1.norm(p=2, dim=1, keepdim=True)
+        w2 = w1 if x2 is x1 else x2.norm(p=2, dim=1, keepdim=True)
+        return torch.mm(x1, x2.t()) / (w1 * w2.t()).clamp(min=eps)
+
+    simmat = pairwise_cosine_similarity(features_A, features_B)
+    print(simmat.shape)
+
+    prec_nums = list(map(int, args.prec_nums.split(',')))
+    results = simmat.topk(max(prec_nums))[1]
+
+    print(type(eval_loader.dataset.indexed_data))
+    return [
+        mean(bool(i_set.intersection(results[u][:k].tolist()))
+             for u, i_set in eval_loader.dataset.indexed_data)
+        for k in prec_nums
+    ]
 
 def train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result):
 
@@ -346,12 +360,23 @@ def train(train_loader, model, criterion, optimizer, epoch, args, info_save, clu
             info_save.write(info + '\n')
 
 
-def compute_features(eval_loader, model, args):
+def compute_features(eval_loader, model, args, withoutfc=False):
     print('Computing features...')
     model.eval()
 
-    features_A = torch.zeros(eval_loader.dataset.domainA_size, args.low_dim).cuda()
-    features_B = torch.zeros(eval_loader.dataset.domainB_size, args.low_dim).cuda()
+    if withoutfc:
+        print('using without-fc')
+        featurizer = models.resnet50()
+        featurizer.fc = torch.nn.Identity()
+        state_dict = model.encoder_k.state_dict()
+        state_dict = {k: state_dict[k] for k in featurizer.state_dict()}
+        featurizer.load_state_dict(state_dict)
+        featurizer.eval()
+        featurizer.cuda()
+
+    dim = 2048 if withoutfc else args.low_dim
+    features_A = torch.zeros(eval_loader.dataset.domainA_size, dim).cuda()
+    features_B = torch.zeros(eval_loader.dataset.domainB_size, dim).cuda()
 
     targets_all_A = torch.zeros(eval_loader.dataset.domainA_size, dtype=torch.int64).cuda()
     targets_all_B = torch.zeros(eval_loader.dataset.domainB_size, dtype=torch.int64).cuda()
@@ -364,7 +389,11 @@ def compute_features(eval_loader, model, args):
             targets_A = targets_A.cuda(non_blocking=True)
             targets_B = targets_B.cuda(non_blocking=True)
 
-            feats_A, feats_B = model(im_q_A=images_A, im_q_B=images_B, is_eval=True)
+            if withoutfc:
+                feats_A = featurizer(images_A)
+                feats_B = featurizer(images_B)
+            else:
+                feats_A, feats_B = model(im_q_A=images_A, im_q_B=images_B, is_eval=True)
 
             features_A[indices_A] = feats_A
             features_B[indices_B] = feats_B
