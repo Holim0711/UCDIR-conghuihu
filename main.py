@@ -9,7 +9,7 @@ import warnings
 from tqdm import tqdm
 import numpy as np
 import faiss
-
+from statistics import mean
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -21,15 +21,35 @@ import torchvision.models as models
 
 import loader
 import builder
+import json
+
 from sklearn.metrics.pairwise import cosine_similarity
+from tqdm import tqdm
+
+def str2bool(v):
+    if isinstance(v, bool):
+       return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('--data_A', metavar='DIR Domain A', help='path to domain A dataset')
-parser.add_argument('--data_B', metavar='DIR Domain B', help='path to domain B dataset')
+parser.add_argument('--data-A', metavar='DIR Domain A', help='path to domain A dataset')
+parser.add_argument('--data-B', metavar='DIR Domain B', help='path to domain B dataset')
+
+### added args###
+parser.add_argument('--withoutfc', type=str2bool, default=False, metavar='withoutfc', help='used without fc for featurizing in test')
+parser.add_argument('--method', type=str, default='default', metavar='method', help='method for test')
+#################
+
+
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -109,7 +129,8 @@ parser.add_argument('--prec-nums', default='1,5,15,20', type=str,
 def main():
     torch.cuda.empty_cache()
     args = parser.parse_args()
-
+    print(args.method)
+    ### seed = None 
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -120,10 +141,11 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
+    ### default 250, 500, 1000
     args.num_cluster = args.num_cluster.split(',')
 
     if not os.path.exists(args.exp_dir):
-        os.mkdir(args.exp_dir)
+        os.makedirs(args.exp_dir, exist_ok=True)
 
     main_worker(args.gpu, args)
 
@@ -138,25 +160,39 @@ def main_worker(gpu, args):
 
     cudnn.benchmark = True
 
+    is_deepfasion = False
+    if 'deepfashion' in args.data_A.lower():
+        is_deepfasion = True
+
+    print('is_deepfasion : ', is_deepfasion)
+
     traindirA = args.data_A     # os.path.join(args.data_A, 'train')
     traindirB = args.data_B     # os.path.join(args.data_B, 'train')
 
+    #train_dataset = loader.TrainDataset(traindirA, traindirB, args.aug_plus)
+    #eval_dataset = loader.EvalDataset(traindirA, traindirB)
+
     train_dataset = loader.TrainDataset(traindirA, traindirB, args.aug_plus)
+    train_dataset_d = loader.DetTrainDataset(traindirA, traindirB)
     eval_dataset = loader.EvalDataset(traindirA, traindirB)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True, sampler=None, drop_last=True)
 
+    train_loader_d = torch.utils.data.DataLoader(
+        train_dataset_d, batch_size=args.batch_size * 2, shuffle=False,
+        num_workers=args.workers, pin_memory=True, sampler=None)
+
     eval_loader = torch.utils.data.DataLoader(
         eval_dataset, batch_size=args.batch_size * 2, shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=None)
-
+    
     model = builder.UCDIR(
         models.__dict__[args.arch],
-        dim=args.low_dim, K_A=eval_dataset.domainA_size, K_B=eval_dataset.domainB_size,
+        dim=args.low_dim, K_A=train_dataset.domainA_size, K_B=train_dataset.domainB_size,
         m=args.moco_m, T=args.temperature, mlp=args.mlp, selfentro_temp=args.selfentro_temp,
-        num_cluster=args.num_cluster,  cwcon_filterthresh=args.cwcon_filterthresh)
+        num_cluster=args.num_cluster,  cwcon_filterthresh=args.cwcon_filterthresh, method=args.method)
 
     torch.cuda.set_device(args.gpu)
     model = model.cuda(args.gpu)
@@ -166,7 +202,6 @@ def main_worker(gpu, args):
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
-
     if args.clean_model:
         if os.path.isfile(args.clean_model):
             print("=> loading pretrained clean model '{}'".format(args.clean_model))
@@ -176,7 +211,6 @@ def main_worker(gpu, args):
 
             current_state = model.state_dict()
             used_pretrained_state = {}
-
             for k in current_state:
                 if 'encoder' in k:
                     k_parts = '.'.join(k.split('.')[1:])
@@ -186,19 +220,29 @@ def main_worker(gpu, args):
         else:
             print("=> no clean model found at '{}'".format(args.clean_model))
 
-    info_save = open(os.path.join(args.exp_dir, 'info.txt'), 'w')
-    best_res_A = [0., 0., 0., 0.]
-    best_res_B = [0., 0., 0., 0.]
-    best_ndcg_A = [0., 0., 0., 0.]
-    best_ndcg_B = [0., 0., 0., 0.]
-    #best_meanap_A = [0., 0., 0., 0.]
-    #best_meanap_B = [0., 0., 0., 0.]
-    best_meanap_A = [0.]
-    best_meanap_B = [0.]
 
+    prec_nums = args.prec_nums.split(',')
+    best_res_A = [0.0] * len(prec_nums)
+    best_res_B = [0.0] * len(prec_nums)
+    best_ndcg_A = [0.0] * len(prec_nums)
+    best_ndcg_B = [0.0] * len(prec_nums)
+    best_meanap_A = [0.0]
+    best_meanap_B = [0.0]
+    best_retrieval_accuracy = [0.0] * len(prec_nums)
+    
+    score_dict = dict()
+    score_dict['precision'] = {'epoch' : 0, 'scoreA' : best_res_A, 'scoreB' : best_res_B} 
+    score_dict['ndcg'] = {'epoch' : 0, 'scoreA' : best_ndcg_A, 'scoreB' : best_ndcg_B}    
+    score_dict['map'] = {'epoch' : 0, 'scoreA' : best_meanap_A, 'scoreB' : best_meanap_B}    
+    score_dict['retrieval_accuracy'] = {'epoch' : 0, 'score' : best_retrieval_accuracy}
+
+    info_save = open(os.path.join(args.exp_dir, 'info.txt'), 'w')
+    with open(os.path.join(args.exp_dir, 'score.json'), 'w') as score_file:
+        json.dump(score_dict, score_file, indent=4)
+    
     for epoch in range(args.epochs):
 
-        features_A, features_B, _, _ = compute_features(eval_loader, model, args)
+        features_A, features_B, _, _ = compute_features(train_loader_d, model, args)
 
         features_A = features_A.numpy()
         features_B = features_B.numpy()
@@ -215,61 +259,83 @@ def main_worker(gpu, args):
 
         train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result)
 
-        features_A, features_B, targets_A, targets_B = compute_features(eval_loader, model, args)
-        features_A = features_A.numpy()
-        targets_A = targets_A.numpy()
-
-        features_B = features_B.numpy()
-        targets_B = targets_B.numpy()
-
-        prec_nums = args.prec_nums.split(',')
-        res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B = retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B,
-                                               preck=(int(prec_nums[0]), int(prec_nums[1]), int(prec_nums[2]), int(prec_nums[3])))
-
-        if (best_res_A[0] + best_res_B[0]) / 2 < (res_A[0] + res_B[0]) / 2:
-            best_res_A = res_A
-            best_res_B = res_B
-
+        if is_deepfasion:
+            retrieval_accuracy = test_deepfashion(eval_loader, model, args, withoutfc=args.withoutfc)
         
-        if (best_ndcg_A[0] + best_ndcg_B[0]) / 2 < (ndcg_A[0] + ndcg_B[0]) / 2:
-            best_ndcg_A = ndcg_A
-            best_ndcg_B = ndcg_B
+            if best_retrieval_accuracy[1] < retrieval_accuracy[1]:
+                best_retrieval_accuracy = retrieval_accuracy
+                score_dict['retrieval_accuracy']['epoch'] = epoch
+                score_dict['retrieval_accuracy']['scoreA'] = best_retrieval_accuracy
+                with open(os.path.join(args.exp_dir, 'score.json'), 'w') as score_file:
+                    json.dump(score_dict, score_file, indent=4)
+        else:
+            res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B = test_nodeepfashion(eval_loader, model, args, withoutfc=args.withoutfc)
+            if (best_res_A[0] + best_res_B[0]) / 2 < (res_A[0] + res_B[0]) / 2:
+                best_res_A = res_A
+                best_res_B = res_B
+                score_dict['precision']['epoch'] = epoch
+                score_dict['precision']['scoreA'] = best_res_A
+                score_dict['precision']['scoreB'] = best_res_B
+                with open(os.path.join(args.exp_dir, 'score.json'), 'w') as score_file:
+                    json.dump(score_dict, score_file, indent=4)
+ 
+            if (best_ndcg_A[0] + best_ndcg_B[0]) / 2 < (ndcg_A[0] + ndcg_B[0]) / 2:
+                best_ndcg_A = ndcg_A
+                best_ndcg_B = ndcg_B
+                score_dict['ndcg']['epoch'] = epoch
+                score_dict['ndcg']['scoreA'] = best_ndcg_A
+                score_dict['ndcg']['scoreB'] = best_ndcg_B
+                with open(os.path.join(args.exp_dir, 'score.json'), 'w') as score_file:
+                    json.dump(score_dict, score_file, indent=4)
         
-        if (best_meanap_A[0] + best_meanap_B[0]) / 2 < (meanap_A[0] + meanap_B[0]) / 2:
-            best_meanap_A = meanap_A
-            best_meanap_B = meanap_B
+            if (best_meanap_A[0] + best_meanap_B[0]) / 2 < (meanap_A[0] + meanap_B[0]) / 2:
+                best_meanap_A = meanap_A
+                best_meanap_B = meanap_B
+                score_dict['map']['epoch'] = epoch
+                score_dict['map']['scoreA'] = best_meanap_A
+                score_dict['map']['scoreB'] = best_meanap_B
+                with open(os.path.join(args.exp_dir, 'score.json'), 'w') as score_file:
+                    json.dump(score_dict, score_file, indent=4)
 
-    info_save.write("Domain A->B: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_A[0],
-                                                                          int(prec_nums[1]), best_res_A[1],
-                                                                          int(prec_nums[2]), best_res_A[2],
-                                                                          int(prec_nums[3]), best_res_A[3]))
+
+    save_checkpoint(model.state_dict(), False, f'{args.exp_dir}/checkpoint.pth.tar')
+
+def test_nodeepfashion(eval_loader, model, args, withoutfc=False):
+    features_A, features_B, targets_A, targets_B = compute_features(eval_loader, model, args, withoutfc=withoutfc)
     
-    info_save.write("Domain A->B: N@{}: {}; N@{}: {}; N@{}: {}; N@{}: {}; \n".format(int(prec_nums[0]), best_ndcg_A[0],
-                                                                          int(prec_nums[1]), best_ndcg_A[1],
-                                                                          int(prec_nums[2]), best_ndcg_A[2],
-                                                                          int(prec_nums[3]), best_ndcg_A[3]))
+    features_A_np = features_A.numpy()
+    targets_A_np = targets_A.numpy()
+    features_B_np = features_B.numpy()
+    targets_B_np = targets_B.numpy()
 
-    info_save.write("Domain A->B: MAP: {}; \n".format(best_meanap_A[0]))
-    # info_save.write("Domain A->B: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; \n".format(int(prec_nums[0]), best_meanap_A[0],
-    #                                                                       int(prec_nums[1]), best_meanap_A[1],
-    #                                                                       int(prec_nums[2]), best_meanap_A[2],
-    #                                                                       int(prec_nums[3]), best_meanap_A[3]))
+    prec_nums = args.prec_nums.split(',')
+    preck = [int(prec_num) for prec_num in prec_nums]
+    res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B = retrieval_precision_NDCG_cal(features_A_np, targets_A_np, features_B_np, targets_B_np, preck=preck)
 
-    info_save.write("Domain B->A: P@{}: {}; P@{}: {}; P@{}: {}; P@{}: {}; \n".format(int(prec_nums[0]), best_res_B[0],
-                                                                          int(prec_nums[1]), best_res_B[1],
-                                                                          int(prec_nums[2]), best_res_B[2],
-                                                                          int(prec_nums[3]), best_res_B[3]))
+    return res_A, res_B, ndcg_A, ndcg_B, meanap_A, meanap_B
+
+def test_deepfashion(eval_loader, model, args, withoutfc=False):
+    features_A, features_B, targets_A, targets_B = compute_features(eval_loader, model, args, withoutfc=withoutfc)
     
-    info_save.write("Domain B->A: N@{}: {}; N@{}: {}; N@{}: {}; N@{}: {}; \n".format(int(prec_nums[0]), best_ndcg_B[0],
-                                                                          int(prec_nums[1]), best_ndcg_B[1],
-                                                                          int(prec_nums[2]), best_ndcg_B[2],
-                                                                          int(prec_nums[3]), best_ndcg_B[3]))
+    def pairwise_cosine_similarity(x1, x2=None, eps=1e-8):
+        x2 = x1 if x2 is None else x2
+        w1 = x1.norm(p=2, dim=1, keepdim=True)
+        w2 = w1 if x2 is x1 else x2.norm(p=2, dim=1, keepdim=True)
+        return torch.mm(x1, x2.t()) / (w1 * w2.t()).clamp(min=eps)
 
-    info_save.write("Domain B->A: MAP: {}; \n".format(best_meanap_B[0]))
-    # info_save.write("Domain B->A: MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; MAP@{}: {}; \n".format(int(prec_nums[0]), best_meanap_B[0],
-    #                                                                       int(prec_nums[1]), best_meanap_B[1],
-    #                                                                       int(prec_nums[2]), best_meanap_B[2],
-    #                                                                       int(prec_nums[3]), best_meanap_B[3]))
+    simmat = pairwise_cosine_similarity(features_A, features_B)
+
+    prec_nums = list(map(int, args.prec_nums.split(',')))
+    results = simmat.topk(max(prec_nums))[1]
+    
+    retrieval_accuracy =  [
+        mean(bool(i_set.intersection(results[u][:k].tolist()))
+        for u, i_set in eval_loader.dataset.indexed_data)
+        for k in prec_nums
+    ]
+   
+    return retrieval_accuracy
+
 
 def train(train_loader, model, criterion, optimizer, epoch, args, info_save, cluster_result):
 
@@ -386,13 +452,39 @@ def train(train_loader, model, criterion, optimizer, epoch, args, info_save, clu
             info = progress.display(i)
             info_save.write(info + '\n')
 
-
-def compute_features(eval_loader, model, args):
+def compute_features(eval_loader, model, args, withoutfc=False):
     print('Computing features...')
     model.eval()
 
-    features_A = torch.zeros(eval_loader.dataset.domainA_size, args.low_dim).cuda()
-    features_B = torch.zeros(eval_loader.dataset.domainB_size, args.low_dim).cuda()
+    if withoutfc:
+        print('using without-fc')
+        if args.method == 'default':
+            featurizer = models.resnet50()
+            featurizer.fc = torch.nn.Identity()
+            state_dict = model.encoder_k.state_dict()
+            state_dict = {k: state_dict[k] for k in featurizer.state_dict()}
+            featurizer.load_state_dict(state_dict)
+            featurizer.eval()
+            featurizer.cuda()
+        elif args.method == 'method1':
+            featurizerA = models.resnet50()
+            featurizerA.fc = torch.nn.Identity()
+            state_dictA = model.encoder_k_A.state_dict()
+            state_dictA = {k: state_dictA[k] for k in featurizerA.state_dict()}
+            featurizerA.load_state_dict(state_dictA)
+            featurizerA.eval()
+            featurizerA.cuda()
+            featurizerB = models.resnet50()
+            featurizerB.fc = torch.nn.Identity()
+            state_dictB = model.encoder_k_B.state_dict()
+            state_dictB = {k: state_dictB[k] for k in featurizerB.state_dict()}
+            featurizerB.load_state_dict(state_dictB)
+            featurizerB.eval()
+            featurizerB.cuda()
+    
+    dim = 2048 if withoutfc else args.low_dim
+    features_A = torch.zeros(eval_loader.dataset.domainA_size, dim).cuda()
+    features_B = torch.zeros(eval_loader.dataset.domainB_size, dim).cuda()
 
     targets_all_A = torch.zeros(eval_loader.dataset.domainA_size, dtype=torch.int64).cuda()
     targets_all_B = torch.zeros(eval_loader.dataset.domainB_size, dtype=torch.int64).cuda()
@@ -405,7 +497,15 @@ def compute_features(eval_loader, model, args):
             targets_A = targets_A.cuda(non_blocking=True)
             targets_B = targets_B.cuda(non_blocking=True)
 
-            feats_A, feats_B = model(im_q_A=images_A, im_q_B=images_B, is_eval=True)
+            if withoutfc:
+                if args.method == 'default':
+                    feats_A = featurizer(images_A)
+                    feats_B = featurizer(images_B)
+                elif args.method == 'method1':
+                    feats_A = featurizerA(images_A)
+                    feats_B = featurizerB(images_B)
+            else:
+                feats_A, feats_B = model(im_q_A=images_A, im_q_B=images_B, is_eval=True)
 
             features_A[indices_A] = feats_A
             features_B[indices_B] = feats_B
@@ -574,8 +674,8 @@ def retrieval_precision_NDCG_cal(features_A, targets_A, features_B, targets_B, p
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
-    if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+    #if is_best:
+    #    shutil.copyfile(filename, 'model_best.pth.tar')
 
 
 class AverageMeter(object):

@@ -8,7 +8,7 @@ class UCDIR(nn.Module):
 
     def __init__(self, base_encoder, dim=128, K_A=65536, K_B=65536,
                  m=0.999, T=0.1, mlp=False, selfentro_temp=0.2,
-                 num_cluster=None, cwcon_filterthresh=0.2):
+                 num_cluster=None, cwcon_filterthresh=0.2, method='default'):
 
         super(UCDIR, self).__init__()
 
@@ -23,17 +23,42 @@ class UCDIR(nn.Module):
 
         norm_layer = partial(SplitBatchNorm, num_splits=2)
 
-        self.encoder_q = base_encoder(num_classes=dim)
-        self.encoder_k = base_encoder(num_classes=dim, norm_layer=norm_layer)
+        self.method = method
 
-        if mlp:  # hack: brute-force replacement
-            dim_mlp = self.encoder_q.fc.weight.shape[1]
-            self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
-            self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
+        if self.method == 'default':
+            self.encoder_q = base_encoder(num_classes=dim)
+            self.encoder_k = base_encoder(num_classes=dim, norm_layer=norm_layer)
+            if mlp:  # hack: brute-force replacement
+                dim_mlp = self.encoder_q.fc.weight.shape[1]
+                self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
+                self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
 
-        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
+            for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+                param_k.data.copy_(param_q.data)  # initialize
+                param_k.requires_grad = False  # not update by gradient
+
+        elif self.method == 'method1':
+            self.encoder_q_A = base_encoder(num_classes=dim)
+            self.encoder_k_A = base_encoder(num_classes=dim, norm_layer=norm_layer)
+            self.encoder_q_B = base_encoder(num_classes=dim)
+            self.encoder_k_B = base_encoder(num_classes=dim, norm_layer=norm_layer)
+
+            if mlp:  # hack: brute-force replacement
+                dim_mlpA = self.encoder_q_A.fc.weight.shape[1]
+                self.encoder_q_A.fc = nn.Sequential(nn.Linear(dim_mlpA, dim_mlpA), nn.ReLU(), self.encoder_q_A.fc)
+                self.encoder_k_A.fc = nn.Sequential(nn.Linear(dim_mlpA, dim_mlpA), nn.ReLU(), self.encoder_k_A.fc)
+            
+                dim_mlpB = self.encoder_q_B.fc.weight.shape[1]
+                self.encoder_q_B.fc = nn.Sequential(nn.Linear(dim_mlpB, dim_mlpB), nn.ReLU(), self.encoder_q_B.fc)
+                self.encoder_k_B.fc = nn.Sequential(nn.Linear(dim_mlpB, dim_mlpB), nn.ReLU(), self.encoder_k_B.fc)
+
+            for param_q, param_k in zip(self.encoder_q_A.parameters(), self.encoder_k_A.parameters()):
+                param_k.data.copy_(param_q.data)  # initialize
+                param_k.requires_grad = False  # not update by gradient
+        
+            for param_q, param_k in zip(self.encoder_q_B.parameters(), self.encoder_k_B.parameters()):
+                param_k.data.copy_(param_q.data)  # initialize
+                param_k.requires_grad = False  # not update by gradient
 
         # create the queues
         self.register_buffer("queue_A", torch.randn(dim, K_A))
@@ -48,9 +73,16 @@ class UCDIR(nn.Module):
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
+        if self.method == 'default':
+            for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+                param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+        elif self.method == 'method1':
+            for param_q, param_k in zip(self.encoder_q_A.parameters(), self.encoder_k_A.parameters()):
+                param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+        
+            for param_q, param_k in zip(self.encoder_q_B.parameters(), self.encoder_k_B.parameters()):
+                param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
 
-        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
-            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
 
     @torch.no_grad()
     def _dequeue_and_enqueue_singlegpu(self, keys, key_ids, domain_id):
@@ -77,60 +109,64 @@ class UCDIR(nn.Module):
     def forward(self, im_q_A, im_q_B, im_k_A=None, im_id_A=None,
                 im_k_B=None, im_id_B=None, is_eval=False,
                 cluster_result=None, criterion=None):
-
-        im_q = torch.cat([im_q_A, im_q_B], dim=0)
-
-        if is_eval:
-            k = self.encoder_k(im_q)
-            k = F.normalize(k, dim=1)
-
-            k_A, k_B = torch.split(k, im_q_A.shape[0])
-            return k_A, k_B
-
-        q = self.encoder_q(im_q)
-        q = F.normalize(q, dim=1)
-
-        q_A, q_B = torch.split(q, im_q_A.shape[0])
-
-        im_k = torch.cat([im_k_A, im_k_B], dim=0)
-
-        with torch.no_grad():
-            self._momentum_update_key_encoder()
-
-            im_k, idx_unshuffle = self._batch_shuffle_singlegpu(im_k)
-
-            k = self.encoder_k(im_k)
-            k = F.normalize(k, dim=1)
-
-            k = self._batch_unshuffle_singlegpu(k, idx_unshuffle)
-
-            k_A, k_B = torch.split(k, im_k_A.shape[0])
+        
+        if self.method == 'default':
+            im_q = torch.cat([im_q_A, im_q_B], dim=0)
+            if is_eval:
+                k = self.encoder_k(im_q)
+                k = F.normalize(k, dim=1)
+                k_A, k_B = torch.split(k, im_q_A.shape[0])
+                return k_A, k_B
+            q = self.encoder_q(im_q)
+            q = F.normalize(q, dim=1)
+            q_A, q_B = torch.split(q, im_q_A.shape[0])
+            im_k = torch.cat([im_k_A, im_k_B], dim=0)
+            with torch.no_grad():
+                self._momentum_update_key_encoder()
+                im_k, idx_unshuffle = self._batch_shuffle_singlegpu(im_k)
+                k = self.encoder_k(im_k)
+                k = F.normalize(k, dim=1)
+                k = self._batch_unshuffle_singlegpu(k, idx_unshuffle)
+                k_A, k_B = torch.split(k, im_k_A.shape[0])
+        elif self.method == 'method1':
+            if is_eval:
+                k_A = self.encoder_k_A(im_q_A)
+                k_B = self.encoder_k_B(im_q_B)
+                k_A = F.normalize(k_A, dim=1)
+                k_B = F.normalize(k_B, dim=1)
+                return k_A, k_B
+            q_A = self.encoder_q_A(im_q_A)
+            q_A = F.normalize(q_A, dim=1)    
+            q_B = self.encoder_q_B(im_q_B)
+            q_B = F.normalize(q_B, dim=1)    
+            with torch.no_grad():
+                self._momentum_update_key_encoder()
+                im_k_A, idx_unshuffle_A = self._batch_shuffle_singlegpu(im_k_A)
+                im_k_B, idx_unshuffle_B = self._batch_shuffle_singlegpu(im_k_B)
+                k_A = self.encoder_k_A(im_k_A)
+                k_A = F.normalize(k_A, dim=1)
+                k_B = self.encoder_k_B(im_k_B)
+                k_B = F.normalize(k_B, dim=1)
+                k_A = self._batch_unshuffle_singlegpu(k_A, idx_unshuffle_A)
+                k_B = self._batch_unshuffle_singlegpu(k_B, idx_unshuffle_B)
 
         self._dequeue_and_enqueue_singlegpu(k_A, im_id_A, 'A')
         self._dequeue_and_enqueue_singlegpu(k_B, im_id_B, 'B')
-
         loss_instcon_A, \
         loss_instcon_B = self.instance_contrastive_loss(q_A, k_A, im_id_A,
                                                         q_B, k_B, im_id_B,
                                                         criterion)
-
         losses_instcon = {'domain_A': loss_instcon_A,
-                          'domain_B': loss_instcon_B}
-
+                             'domain_B': loss_instcon_B}
         if cluster_result is not None:
-
             loss_cwcon_A, \
             loss_cwcon_B = self.cluster_contrastive_loss(q_A, k_A, im_id_A,
                                                          q_B, k_B, im_id_B,
                                                          cluster_result)
-
             losses_cwcon = {'domain_A': loss_cwcon_A,
-                            'domain_B': loss_cwcon_B}
-
+                        'domain_B': loss_cwcon_B}
             losses_selfentro = self.self_entropy_loss(q_A, q_B, cluster_result)
-
             losses_distlogit = self.dist_of_logit_loss(q_A, q_B, cluster_result, self.num_cluster)
-
             return losses_instcon, q_A, q_B, losses_selfentro, losses_distlogit, losses_cwcon
         else:
             return losses_instcon, None, None, None, None, None
