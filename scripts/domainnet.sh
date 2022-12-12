@@ -1,6 +1,6 @@
 #!/bin/bash
 
-domainsA=("quickdraw" "real" "sketch")
+domainsA=("clipart" "infograph" "painting" "quickdraw" "real" "sketch")
 domainsB=("clipart" "infograph" "painting" "quickdraw" "real" "sketch")
 method="method1"
 
