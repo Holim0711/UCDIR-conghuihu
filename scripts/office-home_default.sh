@@ -3,7 +3,7 @@
 domainsA=("Art" "Clipart" "Product" "Real")
 domainsB=("Art" "Clipart" "Product" "Real")
 
-method="method2"
+method="default"
 
 for domainA in ${domainsA[@]};
 do
@@ -21,7 +21,7 @@ do
             then 
                 tgdomainB="Real World"
             fi
-            python main_2.py \
+            python main.py \
                 -a resnet50 \
                 --batch-size 64 \
                 --mlp --aug-plus --cos \
@@ -48,8 +48,7 @@ do
                 --prec-nums '1,5,15,20' \
                 --withoutfc 'True' \
                 --method $method \
-                --smg 'sg' \
-                --gpu 2
+                --gpu 3
         fi
     done
 done

@@ -1,8 +1,8 @@
 #!/bin/bash
 
-method="method1"
+method="method2and3"
 
-python main.py \
+python main_2and3.py \
     -a resnet50 \
     --batch-size 64 \
     --mlp --aug-plus --cos \
@@ -29,4 +29,6 @@ python main.py \
     --prec-nums '1,20,50' \
     --withoutfc 'True' \
     --method $method \
-    --gpu 2
+    --domain-weight 1.0 \
+    --smg 'sg' \
+    --gpu 0

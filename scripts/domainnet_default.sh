@@ -1,17 +1,14 @@
 #!/bin/bash
 
-domainsA=("clipart" "infograph" "painting" "quickdraw" "real" "sketch")
-domainsB=("clipart" "infograph" "painting" "quickdraw" "real" "sketch")
+domains=("clipart" "infograph" "painting" "quickdraw" "real" "sketch")
 
-method="method2"
-
-for domainA in ${domainsA[@]};
+for domainA in ${domains[@]};
 do
-    for domainB in ${domainsB[@]};
+    for domainB in ${domains[@]};
     do
         if [ $domainA != $domainB ]
         then
-            python main_2.py \
+            python main.py \
                 -a resnet50 \
                 --batch-size 64 \
                 --mlp --aug-plus --cos \
@@ -20,7 +17,7 @@ do
                 --num-cluster '7' \
                 --warmup-epoch 20 \
                 --temperature 0.2 \
-                --exp-dir "./experiments/$method/domainnet/$domainA-$domainB" \
+                --exp-dir "./experiments/default/domainnet/$domainA-$domainB" \
                 --lr 0.0002 \
                 --clean-model 'moco_v2_800ep_pretrain.pth.tar' \
                 --instcon-weight 1.0 \
@@ -37,9 +34,8 @@ do
                 --distofdist-startepoch 100 \
                 --prec-nums '20,50,100,200' \
                 --withoutfc 'True' \
-                --method $method \
-                --smg 'sg' \
-                --gpu 1
+                --method 'default' \
+                --gpu 3
         fi
     done
 done
